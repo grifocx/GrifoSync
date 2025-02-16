@@ -5,11 +5,12 @@ from wtforms import StringField, PasswordField, SubmitField
 from wtforms.validators import DataRequired, Email, Length, EqualTo, ValidationError
 from flask_migrate import Migrate
 import os
+from models import db, User, BackupJob
+from datetime import datetime
 from icloud_to_s3.auth import AuthenticationManager
 from icloud_to_s3.backup import BackupManager
 from icloud_to_s3.utils import handle_2fa_challenge
-from models import db, User, BackupJob
-from datetime import datetime
+
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(24)
@@ -69,13 +70,13 @@ class TwoFactorForm(FlaskForm):
 @app.route('/')
 def index():
     if current_user.is_authenticated:
-        return redirect(url_for('backup'))
+        return redirect(url_for('dashboard'))
     return render_template('index.html')
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if current_user.is_authenticated:
-        return redirect(url_for('backup'))
+        return redirect(url_for('dashboard'))
 
     form = RegistrationForm()
     if form.validate_on_submit():
@@ -92,7 +93,7 @@ def register():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
-        return redirect(url_for('backup'))
+        return redirect(url_for('dashboard'))
 
     form = LoginForm()
     if form.validate_on_submit():
@@ -100,15 +101,15 @@ def login():
         if user and user.check_password(form.password.data):
             login_user(user)
             next_page = request.args.get('next')
-            return redirect(next_page) if next_page else redirect(url_for('backup'))
+            return redirect(next_page) if next_page else redirect(url_for('dashboard'))
         else:
             flash('Invalid username or password', 'error')
 
     return render_template('login.html', form=form)
 
-@app.route('/backup', methods=['GET', 'POST'])
+@app.route('/dashboard', methods=['GET', 'POST'])
 @login_required
-def backup():
+def dashboard():
     form = CloudCredentialsForm()
     if form.validate_on_submit():
         try:
@@ -117,14 +118,7 @@ def backup():
             # Authenticate with iCloud
             if not auth_manager.authenticate_icloud(form.icloud_username.data, form.icloud_password.data):
                 flash('Failed to authenticate with iCloud', 'error')
-                return render_template('backup.html', form=form)
-
-            # Store credentials in session for 2FA and backup process
-            session['icloud_username'] = form.icloud_username.data
-            session['icloud_password'] = form.icloud_password.data
-            session['aws_access_key'] = form.aws_access_key.data
-            session['aws_secret_key'] = form.aws_secret_key.data
-            session['s3_bucket'] = form.s3_bucket.data
+                return render_template('dashboard.html', form=form)
 
             # Check if 2FA is required
             if auth_manager.get_icloud_api().requires_2fa:
@@ -133,15 +127,16 @@ def backup():
             # If no 2FA required, proceed with AWS authentication
             if not auth_manager.authenticate_aws(form.aws_access_key.data, form.aws_secret_key.data):
                 flash('Failed to authenticate with AWS', 'error')
-                return render_template('backup.html', form=form)
+                return render_template('dashboard.html', form=form)
 
             return redirect(url_for('start_backup'))
 
         except Exception as e:
             flash(f'Error: {str(e)}', 'error')
-            return render_template('backup.html', form=form)
+            return render_template('dashboard.html', form=form)
 
-    return render_template('backup.html', form=form)
+    return render_template('dashboard.html', form=form)
+
 
 @app.route('/2fa', methods=['GET', 'POST'])
 @login_required
@@ -151,13 +146,15 @@ def two_factor_auth():
     if form.validate_on_submit():
         try:
             auth_manager = AuthenticationManager()
-            auth_manager.authenticate_icloud(session['icloud_username'], session['icloud_password'])
+            
+            #Using session data here is not ideal but follows original code logic
+            auth_manager.authenticate_icloud(session.get('icloud_username'), session.get('icloud_password'))
 
             if auth_manager.get_icloud_api().validate_2fa_code(form.code.data):
                 # 2FA successful, proceed with AWS authentication
-                if not auth_manager.authenticate_aws(session['aws_access_key'], session['aws_secret_key']):
+                if not auth_manager.authenticate_aws(session.get('aws_access_key'), session.get('aws_secret_key')):
                     flash('Failed to authenticate with AWS', 'error')
-                    return redirect(url_for('backup'))
+                    return redirect(url_for('dashboard'))
 
                 return redirect(url_for('start_backup'))
             else:
@@ -180,8 +177,8 @@ def start_backup():
         db.session.commit()
 
         auth_manager = AuthenticationManager()
-        auth_manager.authenticate_icloud(session['icloud_username'], session['icloud_password'])
-        auth_manager.authenticate_aws(session['aws_access_key'], session['aws_secret_key'])
+        auth_manager.authenticate_icloud(session.get('icloud_username'), session.get('icloud_password'))
+        auth_manager.authenticate_aws(session.get('aws_access_key'), session.get('aws_secret_key'))
 
         backup_manager = BackupManager(
             auth_manager.get_icloud_api(),
@@ -194,7 +191,7 @@ def start_backup():
             backup_job.error_message = 'No files found in iCloud'
             db.session.commit()
             flash('No files found in iCloud', 'warning')
-            return redirect(url_for('backup'))
+            return redirect(url_for('dashboard'))
 
         # Update backup job with total files
         backup_job.total_files = len(files)
@@ -202,7 +199,7 @@ def start_backup():
 
         # Store files in session for the actual backup process
         session['files_to_backup'] = len(files)
-        backup_manager.backup_to_s3(session['s3_bucket'], files)
+        backup_manager.backup_to_s3(session.get('s3_bucket'), files)
 
         # Update backup job status
         backup_job.status = 'completed'
@@ -211,7 +208,7 @@ def start_backup():
         db.session.commit()
 
         flash('Backup completed successfully!', 'success')
-        return redirect(url_for('backup'))
+        return redirect(url_for('dashboard'))
 
     except Exception as e:
         # Update backup job with error
@@ -222,7 +219,7 @@ def start_backup():
             db.session.commit()
 
         flash(f'Error starting backup: {str(e)}', 'error')
-        return redirect(url_for('backup'))
+        return redirect(url_for('dashboard'))
 
 @app.route('/logout')
 @login_required

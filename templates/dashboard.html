@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container">
+    <h1 class="mb-4">Welcome, {{ current_user.username }}!</h1>
+
+    <div class="row">
+        <div class="col-md-8 offset-md-2">
+            {% if not current_user.cloud_credentials %}
+            <div class="card">
+                <div class="card-header">
+                    <h2>Getting Started</h2>
+                </div>
+                <div class="card-body">
+                    <p class="lead">Welcome to iCloud to S3 Backup! To start backing up your files, you'll need to set up your cloud credentials.</p>
+
+                    <div class="mt-4">
+                        <h3>Next Steps:</h3>
+                        <ol class="list-group list-group-numbered mb-4">
+                            <li class="list-group-item">Configure your iCloud credentials</li>
+                            <li class="list-group-item">Set up your AWS S3 credentials</li>
+                            <li class="list-group-item">Start your first backup</li>
+                        </ol>
+
+                        <div class="d-grid">
+                            <a href="{{ url_for('setup_credentials') }}" class="btn btn-primary btn-lg">
+                                Set Up Cloud Credentials
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% else %}
+            <div class="card">
+                <div class="card-header">
+                    <h2>Backup Status</h2>
+                </div>
+                <div class="card-body">
+                    <div class="mb-4">
+                        <h4>Cloud Credentials</h4>
+                        <p>
+                            <strong>iCloud Account:</strong> {{ current_user.cloud_credentials.icloud_username }}<br>
+                            <strong>S3 Bucket:</strong> {{ current_user.cloud_credentials.s3_bucket }}
+                        </p>
+                        <a href="{{ url_for('setup_credentials') }}" class="btn btn-outline-primary">
+                            Update Credentials
+                        </a>
+                    </div>
+
+                    <div class="mt-4">
+                        <h4>Recent Backups</h4>
+                        {% if current_user.backup_jobs %}
+                            <table class="table">
+                                <thead>
+                                    <tr>
+                                        <th>Date</th>
+                                        <th>Status</th>
+                                        <th>Files</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for job in current_user.backup_jobs[-5:] %}
+                                    <tr>
+                                        <td>{{ job.start_time.strftime('%Y-%m-%d %H:%M') }}</td>
+                                        <td>
+                                            {% if job.status == 'completed' %}
+                                                <span class="badge bg-success">Completed</span>
+                                            {% elif job.status == 'failed' %}
+                                                <span class="badge bg-danger">Failed</span>
+                                            {% else %}
+                                                <span class="badge bg-warning">{{ job.status }}</span>
+                                            {% endif %}
+                                        </td>
+                                        <td>{{ job.processed_files }}/{{ job.total_files }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        {% else %}
+                            <p>No backup jobs yet.</p>
+                        {% endif %}
+
+                        <div class="d-grid mt-4">
+                            <a href="{{ url_for('start_backup') }}" class="btn btn-success btn-lg">
+                                Start New Backup
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}
