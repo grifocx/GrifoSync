@@ -6,48 +6,12 @@
 
     <div class="row">
         <div class="col-md-8 offset-md-2">
-            {% if not current_user.cloud_credentials %}
             <div class="card">
                 <div class="card-header">
-                    <h2>Getting Started</h2>
-                </div>
-                <div class="card-body">
-                    <p class="lead">Welcome to iCloud to S3 Backup! To start backing up your files, you'll need to set up your cloud credentials.</p>
-
-                    <div class="mt-4">
-                        <h3>Next Steps:</h3>
-                        <ol class="list-group list-group-numbered mb-4">
-                            <li class="list-group-item">Configure your iCloud credentials</li>
-                            <li class="list-group-item">Set up your AWS S3 credentials</li>
-                            <li class="list-group-item">Start your first backup</li>
-                        </ol>
-
-                        <div class="d-grid">
-                            <a href="{{ url_for('setup_credentials') }}" class="btn btn-primary btn-lg">
-                                Set Up Cloud Credentials
-                            </a>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            {% else %}
-            <div class="card">
-                <div class="card-header">
-                    <h2>Backup Status</h2>
+                    <h2>iCloud Backup Dashboard</h2>
                 </div>
                 <div class="card-body">
                     <div class="mb-4">
-                        <h4>Cloud Credentials</h4>
-                        <p>
-                            <strong>iCloud Account:</strong> {{ current_user.cloud_credentials.icloud_username }}<br>
-                            <strong>S3 Bucket:</strong> {{ current_user.cloud_credentials.s3_bucket }}
-                        </p>
-                        <a href="{{ url_for('setup_credentials') }}" class="btn btn-outline-primary">
-                            Update Credentials
-                        </a>
-                    </div>
-
-                    <div class="mt-4">
                         <h4>Recent Backups</h4>
                         {% if current_user.backup_jobs %}
                             <table class="table">
@@ -67,6 +31,9 @@
                                                 <span class="badge bg-success">Completed</span>
                                             {% elif job.status == 'failed' %}
                                                 <span class="badge bg-danger">Failed</span>
+                                                {% if job.error_message %}
+                                                <div class="small text-danger">{{ job.error_message }}</div>
+                                                {% endif %}
                                             {% else %}
                                                 <span class="badge bg-warning">{{ job.status }}</span>
                                             {% endif %}
@@ -81,14 +48,13 @@
                         {% endif %}
 
                         <div class="d-grid mt-4">
-                            <a href="{{ url_for('start_backup') }}" class="btn btn-success btn-lg">
+                            <a href="{{ url_for('start_backup') }}" class="btn btn-primary btn-lg">
                                 Start New Backup
                             </a>
                         </div>
                     </div>
                 </div>
             </div>
-            {% endif %}
         </div>
     </div>
 </div>

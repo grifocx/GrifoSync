@@ -6,14 +6,14 @@ from wtforms import StringField, PasswordField, SubmitField
 from wtforms.validators import DataRequired, Email, Length, EqualTo, ValidationError
 from flask_migrate import Migrate
 import os
-from models import db, User, BackupJob, CloudCredentials
+from models import db, User, BackupJob
 from datetime import datetime
 from icloud_to_s3.auth import AuthenticationManager
 from icloud_to_s3.backup import BackupManager
 from icloud_to_s3.utils import handle_2fa_challenge, validate_bucket_name
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', os.urandom(24))
 app.config['SESSION_COOKIE_SECURE'] = True
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=1)
@@ -58,11 +58,11 @@ class RegistrationForm(FlaskForm):
         if user:
             raise ValidationError('Email already registered. Please use another one.')
 
-class CloudCredentialsForm(FlaskForm):
+class BackupCredentialsForm(FlaskForm):
     icloud_username = StringField('iCloud Username', validators=[DataRequired(), Email()])
     icloud_password = PasswordField('iCloud Password', validators=[DataRequired()])
-    aws_access_key = StringField('AWS Access Key', validators=[DataRequired()])
-    aws_secret_key = PasswordField('AWS Secret Key', validators=[DataRequired()])
+    aws_access_key = StringField('AWS Access Key', validators=[DataRequired(), Length(min=20, max=20)])
+    aws_secret_key = PasswordField('AWS Secret Key', validators=[DataRequired(), Length(min=40)])
     s3_bucket = StringField('S3 Bucket Name', validators=[DataRequired()])
     submit = SubmitField('Start Backup')
 
@@ -110,16 +110,16 @@ def login():
 
     return render_template('login.html', form=form)
 
-@app.route('/dashboard', methods=['GET', 'POST'])
+@app.route('/dashboard')
 @login_required
 def dashboard():
-    credentials = CloudCredentials.query.filter_by(user_id=current_user.id).first()
     return render_template('dashboard.html', current_user=current_user)
 
-@app.route('/setup_credentials', methods=['GET', 'POST'])
+@app.route('/start_backup', methods=['GET', 'POST'])
 @login_required
-def setup_credentials():
-    form = CloudCredentialsForm()
+def start_backup():
+    form = BackupCredentialsForm()
+
     if form.validate_on_submit():
         try:
             auth_manager = AuthenticationManager()
@@ -127,7 +127,7 @@ def setup_credentials():
             # Validate iCloud credentials
             if not auth_manager.authenticate_icloud(form.icloud_username.data, form.icloud_password.data):
                 flash('Failed to authenticate with iCloud', 'error')
-                return render_template('setup_credentials.html', form=form)
+                return render_template('backup_credentials.html', form=form)
 
             # Store credentials temporarily for 2FA process
             session['temp_icloud_username'] = form.icloud_username.data
@@ -143,31 +143,16 @@ def setup_credentials():
             # If no 2FA required, validate AWS credentials
             if not auth_manager.authenticate_aws(form.aws_access_key.data, form.aws_secret_key.data):
                 flash('Failed to authenticate with AWS', 'error')
-                return render_template('setup_credentials.html', form=form)
+                return render_template('backup_credentials.html', form=form)
 
-            # Save credentials
-            credentials = CloudCredentials.query.filter_by(user_id=current_user.id).first()
-            if not credentials:
-                credentials = CloudCredentials(user_id=current_user.id)
-
-            credentials.icloud_username = form.icloud_username.data
-            # Store sensitive data in Replit Secrets
-            os.environ[f'ICLOUD_PWD_{current_user.id}'] = form.icloud_password.data
-            os.environ[f'AWS_KEY_{current_user.id}'] = form.aws_access_key.data
-            os.environ[f'AWS_SECRET_{current_user.id}'] = form.aws_secret_key.data
-            os.environ[f'S3_BUCKET_{current_user.id}'] = form.s3_bucket.data
-
-            db.session.add(credentials)
-            db.session.commit()
-
-            flash('Cloud credentials configured successfully!', 'success')
-            return redirect(url_for('dashboard'))
+            # Proceed with backup
+            return redirect(url_for('perform_backup'))
 
         except Exception as e:
             flash(f'Error: {str(e)}', 'error')
-            return render_template('setup_credentials.html', form=form)
+            return render_template('backup_credentials.html', form=form)
 
-    return render_template('setup_credentials.html', form=form)
+    return render_template('backup_credentials.html', form=form)
 
 @app.route('/2fa', methods=['GET', 'POST'])
 @login_required
@@ -178,16 +163,15 @@ def two_factor_auth():
         try:
             auth_manager = AuthenticationManager()
 
-            #Using session data here is not ideal but follows original code logic
-            auth_manager.authenticate_icloud(session.get('temp_icloud_username'), session.get('temp_icloud_password'))
+            # Authenticate with iCloud using temporary credentials
+            auth_manager.authenticate_icloud(
+                session.get('temp_icloud_username'),
+                session.get('temp_icloud_password')
+            )
 
             if auth_manager.get_icloud_api().validate_2fa_code(form.code.data):
-                # 2FA successful, proceed with AWS authentication
-                if not auth_manager.authenticate_aws(session.get('temp_aws_access_key'), session.get('temp_aws_secret_key')):
-                    flash('Failed to authenticate with AWS', 'error')
-                    return redirect(url_for('dashboard'))
-
-                return redirect(url_for('start_backup'))
+                # 2FA successful, proceed with backup
+                return redirect(url_for('perform_backup'))
             else:
                 flash('Invalid verification code', 'error')
                 return render_template('2fa.html', form=form)
@@ -198,23 +182,31 @@ def two_factor_auth():
 
     return render_template('2fa.html', form=form)
 
-@app.route('/start_backup')
+@app.route('/perform_backup')
 @login_required
-def start_backup():
+def perform_backup():
     try:
-        credentials = CloudCredentials.query.filter_by(user_id=current_user.id).first()
-        if not credentials:
-            flash('Please configure your cloud credentials first', 'warning')
-            return redirect(url_for('setup_credentials'))
-
         # Create a new backup job
-        backup_job = BackupJob(user_id=current_user.id, status='in_progress')
+        backup_job = BackupJob(
+            user_id=current_user.id,
+            status='in_progress',
+            start_time=datetime.utcnow()
+        )
         db.session.add(backup_job)
         db.session.commit()
 
         auth_manager = AuthenticationManager()
-        auth_manager.authenticate_icloud(credentials.icloud_username, credentials.icloud_password)
-        auth_manager.authenticate_aws(credentials.aws_access_key, credentials.aws_secret_key)
+
+        # Authenticate with temporary credentials
+        auth_manager.authenticate_icloud(
+            session.get('temp_icloud_username'),
+            session.get('temp_icloud_password')
+        )
+
+        auth_manager.authenticate_aws(
+            session.get('temp_aws_access_key'),
+            session.get('temp_aws_secret_key')
+        )
 
         backup_manager = BackupManager(
             auth_manager.get_icloud_api(),
@@ -233,7 +225,8 @@ def start_backup():
         backup_job.total_files = len(files)
         db.session.commit()
 
-        backup_manager.backup_to_s3(credentials.s3_bucket, files)
+        # Perform backup
+        backup_manager.backup_to_s3(session.get('temp_s3_bucket'), files)
 
         # Update backup job status
         backup_job.status = 'completed'
@@ -241,18 +234,24 @@ def start_backup():
         backup_job.end_time = datetime.utcnow()
         db.session.commit()
 
+        # Clear temporary credentials from session
+        session.pop('temp_icloud_username', None)
+        session.pop('temp_icloud_password', None)
+        session.pop('temp_aws_access_key', None)
+        session.pop('temp_aws_secret_key', None)
+        session.pop('temp_s3_bucket', None)
+
         flash('Backup completed successfully!', 'success')
         return redirect(url_for('dashboard'))
 
     except Exception as e:
-        # Update backup job with error
         if 'backup_job' in locals():
             backup_job.status = 'failed'
             backup_job.error_message = str(e)
             backup_job.end_time = datetime.utcnow()
             db.session.commit()
 
-        flash(f'Error starting backup: {str(e)}', 'error')
+        flash(f'Error during backup: {str(e)}', 'error')
         return redirect(url_for('dashboard'))
 
 @app.route('/logout')
