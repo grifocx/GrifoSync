@@ -1,22 +1,58 @@
 from flask import Flask, render_template, flash, redirect, url_for, request, session
-from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from flask_login import LoginManager, login_user, login_required, logout_user, current_user
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, SubmitField
-from wtforms.validators import DataRequired, Email
+from wtforms.validators import DataRequired, Email, Length, EqualTo, ValidationError
 import os
 from icloud_to_s3.auth import AuthenticationManager
 from icloud_to_s3.backup import BackupManager
 from icloud_to_s3.utils import handle_2fa_challenge
+from models import db, User, BackupJob
+from datetime import datetime
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(24)
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Initialize Flask-Login
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
-class User(UserMixin):
-    def __init__(self, id):
-        self.id = id
+# Initialize SQLAlchemy
+db.init_app(app)
+
+# Create tables
+with app.app_context():
+    db.create_all()
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+class LoginForm(FlaskForm):
+    username = StringField('Username', validators=[DataRequired()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    submit = SubmitField('Login')
+
+class RegistrationForm(FlaskForm):
+    username = StringField('Username', validators=[DataRequired(), Length(min=4, max=80)])
+    email = StringField('Email', validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired(), Length(min=6)])
+    confirm_password = PasswordField('Confirm Password', 
+                                   validators=[DataRequired(), EqualTo('password')])
+    submit = SubmitField('Register')
+
+    def validate_username(self, username):
+        user = User.query.filter_by(username=username.data).first()
+        if user:
+            raise ValidationError('Username already exists. Please choose another one.')
+
+    def validate_email(self, email):
+        user = User.query.filter_by(email=email.data).first()
+        if user:
+            raise ValidationError('Email already registered. Please use another one.')
 
 class CloudCredentialsForm(FlaskForm):
     icloud_username = StringField('iCloud Username', validators=[DataRequired(), Email()])
@@ -30,15 +66,45 @@ class TwoFactorForm(FlaskForm):
     code = StringField('Verification Code', validators=[DataRequired()])
     submit = SubmitField('Verify')
 
-@login_manager.user_loader
-def load_user(user_id):
-    return User(user_id)
-
 @app.route('/')
 def index():
     if current_user.is_authenticated:
         return redirect(url_for('backup'))
     return render_template('index.html')
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if current_user.is_authenticated:
+        return redirect(url_for('backup'))
+
+    form = RegistrationForm()
+    if form.validate_on_submit():
+        user = User(username=form.username.data, email=form.email.data)
+        user.set_password(form.password.data)
+        db.session.add(user)
+        db.session.commit()
+
+        flash('Registration successful! Please login.', 'success')
+        return redirect(url_for('login'))
+
+    return render_template('register.html', form=form)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for('backup'))
+
+    form = LoginForm()
+    if form.validate_on_submit():
+        user = User.query.filter_by(username=form.username.data).first()
+        if user and user.check_password(form.password.data):
+            login_user(user)
+            next_page = request.args.get('next')
+            return redirect(next_page) if next_page else redirect(url_for('backup'))
+        else:
+            flash('Invalid username or password', 'error')
+
+    return render_template('login.html', form=form)
 
 @app.route('/backup', methods=['GET', 'POST'])
 @login_required
@@ -108,6 +174,11 @@ def two_factor_auth():
 @login_required
 def start_backup():
     try:
+        # Create a new backup job
+        backup_job = BackupJob(user_id=current_user.id, status='in_progress')
+        db.session.add(backup_job)
+        db.session.commit()
+
         auth_manager = AuthenticationManager()
         auth_manager.authenticate_icloud(session['icloud_username'], session['icloud_password'])
         auth_manager.authenticate_aws(session['aws_access_key'], session['aws_secret_key'])
@@ -119,28 +190,39 @@ def start_backup():
 
         files = backup_manager.list_icloud_files()
         if not files:
+            backup_job.status = 'failed'
+            backup_job.error_message = 'No files found in iCloud'
+            db.session.commit()
             flash('No files found in iCloud', 'warning')
             return redirect(url_for('backup'))
+
+        # Update backup job with total files
+        backup_job.total_files = len(files)
+        db.session.commit()
 
         # Store files in session for the actual backup process
         session['files_to_backup'] = len(files)
         backup_manager.backup_to_s3(session['s3_bucket'], files)
 
+        # Update backup job status
+        backup_job.status = 'completed'
+        backup_job.processed_files = len(files)
+        backup_job.end_time = datetime.utcnow()
+        db.session.commit()
+
         flash('Backup completed successfully!', 'success')
         return redirect(url_for('backup'))
 
     except Exception as e:
+        # Update backup job with error
+        if 'backup_job' in locals():
+            backup_job.status = 'failed'
+            backup_job.error_message = str(e)
+            backup_job.end_time = datetime.utcnow()
+            db.session.commit()
+
         flash(f'Error starting backup: {str(e)}', 'error')
         return redirect(url_for('backup'))
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        # For demo purposes, accept any login
-        user = User('demo_user')
-        login_user(user)
-        return redirect(url_for('backup'))
-    return render_template('login.html')
 
 @app.route('/logout')
 @login_required
