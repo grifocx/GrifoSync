@@ -6,18 +6,30 @@ from wtforms import StringField, PasswordField, SubmitField
 from wtforms.validators import DataRequired, Email, Length, EqualTo, ValidationError
 from flask_migrate import Migrate
 import os
+import logging
 from models import db, User, BackupJob
 from datetime import datetime
 from icloud_to_s3.auth import AuthenticationManager
 from icloud_to_s3.backup import BackupManager
 from icloud_to_s3.utils import handle_2fa_challenge, validate_bucket_name
 
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
+
+# Load and validate database URL
+database_url = os.environ.get('DATABASE_URL')
+if not database_url:
+    raise ValueError("DATABASE_URL environment variable is not set")
+logger.info("Database URL is configured")
+
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', os.urandom(24))
 app.config['SESSION_COOKIE_SECURE'] = True
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=1)
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Initialize Flask-Login
@@ -25,11 +37,17 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
-# Initialize SQLAlchemy
-db.init_app(app)
+try:
+    # Initialize SQLAlchemy
+    db.init_app(app)
+    logger.info("SQLAlchemy initialized successfully")
 
-# Initialize Flask-Migrate
-migrate = Migrate(app, db)
+    # Initialize Flask-Migrate
+    migrate = Migrate(app, db)
+    logger.info("Flask-Migrate initialized successfully")
+except Exception as e:
+    logger.error(f"Error initializing database: {str(e)}")
+    raise
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -261,4 +279,16 @@ def logout():
     return redirect(url_for('index'))
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Get port from environment variable or default to 8080
+    port = int(os.environ.get('PORT', 8080))
+
+    try:
+        # Create tables if they don't exist
+        with app.app_context():
+            db.create_all()
+            logger.info("Database tables created successfully")
+    except Exception as e:
+        logger.error(f"Error creating database tables: {str(e)}")
+        raise
+
+    app.run(host='0.0.0.0', port=port, debug=True)

@@ -46,11 +46,16 @@ task = "packager.installForAll"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python app.py"
-waitForPort = 5000
+waitForPort = 8080
 
 [deployment]
 run = ["sh", "-c", "python app.py"]
+deploymentTarget = "cloudrun"
 
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
