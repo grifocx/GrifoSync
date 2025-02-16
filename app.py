@@ -5,12 +5,11 @@ from wtforms import StringField, PasswordField, SubmitField
 from wtforms.validators import DataRequired, Email, Length, EqualTo, ValidationError
 from flask_migrate import Migrate
 import os
-from models import db, User, BackupJob
+from models import db, User, BackupJob, CloudCredentials
 from datetime import datetime
 from icloud_to_s3.auth import AuthenticationManager
 from icloud_to_s3.backup import BackupManager
-from icloud_to_s3.utils import handle_2fa_challenge
-
+from icloud_to_s3.utils import handle_2fa_challenge, validate_bucket_name
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(24)
@@ -110,33 +109,69 @@ def login():
 @app.route('/dashboard', methods=['GET', 'POST'])
 @login_required
 def dashboard():
+    credentials = CloudCredentials.query.filter_by(user_id=current_user.id).first()
+    if credentials:
+        session['icloud_username'] = credentials.icloud_username
+        session['icloud_password'] = credentials.icloud_password
+        session['aws_access_key'] = credentials.aws_access_key
+        session['aws_secret_key'] = credentials.aws_secret_key
+        session['s3_bucket'] = credentials.s3_bucket
+        return redirect(url_for('start_backup'))
+    else:
+        return redirect(url_for('setup_credentials'))
+
+
+@app.route('/setup_credentials', methods=['GET', 'POST'])
+@login_required
+def setup_credentials():
     form = CloudCredentialsForm()
     if form.validate_on_submit():
         try:
             auth_manager = AuthenticationManager()
 
-            # Authenticate with iCloud
+            # Validate iCloud credentials
             if not auth_manager.authenticate_icloud(form.icloud_username.data, form.icloud_password.data):
                 flash('Failed to authenticate with iCloud', 'error')
-                return render_template('dashboard.html', form=form)
+                return render_template('setup_credentials.html', form=form)
 
-            # Check if 2FA is required
+            # Store credentials temporarily for 2FA process
+            session['icloud_username'] = form.icloud_username.data
+            session['icloud_password'] = form.icloud_password.data
+            session['aws_access_key'] = form.aws_access_key.data
+            session['aws_secret_key'] = form.aws_secret_key.data
+            session['s3_bucket'] = form.s3_bucket.data
+
+            # If 2FA is required, redirect to 2FA page
             if auth_manager.get_icloud_api().requires_2fa:
                 return redirect(url_for('two_factor_auth'))
 
-            # If no 2FA required, proceed with AWS authentication
+            # If no 2FA required, validate AWS credentials
             if not auth_manager.authenticate_aws(form.aws_access_key.data, form.aws_secret_key.data):
                 flash('Failed to authenticate with AWS', 'error')
-                return render_template('dashboard.html', form=form)
+                return render_template('setup_credentials.html', form=form)
 
-            return redirect(url_for('start_backup'))
+            # Save credentials
+            credentials = CloudCredentials.query.filter_by(user_id=current_user.id).first()
+            if not credentials:
+                credentials = CloudCredentials(user_id=current_user.id)
+
+            credentials.icloud_username = form.icloud_username.data
+            credentials.icloud_password = form.icloud_password.data
+            credentials.aws_access_key = form.aws_access_key.data
+            credentials.aws_secret_key = form.aws_secret_key.data
+            credentials.s3_bucket = form.s3_bucket.data
+
+            db.session.add(credentials)
+            db.session.commit()
+
+            flash('Cloud credentials configured successfully!', 'success')
+            return redirect(url_for('dashboard'))
 
         except Exception as e:
             flash(f'Error: {str(e)}', 'error')
-            return render_template('dashboard.html', form=form)
+            return render_template('setup_credentials.html', form=form)
 
-    return render_template('dashboard.html', form=form)
-
+    return render_template('setup_credentials.html', form=form)
 
 @app.route('/2fa', methods=['GET', 'POST'])
 @login_required

@@ -18,67 +18,41 @@ def main():
     # Initialize configuration
     config = Config()
 
-    # Try loading from environment variables first
-    config.load_from_env()
+    try:
+        # Initialize managers
+        auth_manager = AuthenticationManager()
+        backup_manager = None
 
-    # If any required config is missing, prompt user for input
-    if not all([config.icloud_username, config.icloud_password,
+        # If we have credentials, try to authenticate
+        if all([config.icloud_username, config.icloud_password,
                 config.aws_access_key, config.aws_secret_key,
                 config.s3_bucket]):
-        config.load_from_input()
 
-    try:
-        # Initialize authentication manager
-        auth_manager = AuthenticationManager()
+            # Authenticate with services
+            if auth_manager.authenticate_icloud(config.icloud_username, config.icloud_password):
+                # Handle 2FA if needed
+                if not handle_2fa_challenge(auth_manager.get_icloud_api()):
+                    logger.error("Failed to complete 2FA verification")
+                    sys.exit(1)
 
-        # Authenticate with iCloud
-        print("\nAuthenticating with iCloud...")
-        if not auth_manager.authenticate_icloud(config.icloud_username, config.icloud_password):
-            logger.error("Failed to authenticate with iCloud")
-            sys.exit(1)
+                if auth_manager.authenticate_aws(config.aws_access_key, config.aws_secret_key):
+                    backup_manager = BackupManager(
+                        auth_manager.get_icloud_api(),
+                        auth_manager.get_s3_client()
+                    )
 
-        # Handle 2FA if needed
-        if not handle_2fa_challenge(auth_manager.get_icloud_api()):
-            logger.error("Failed to complete 2FA verification")
-            sys.exit(1)
+        # Start backup process if authenticated
+        if backup_manager:
+            files = backup_manager.list_icloud_files()
+            if not files:
+                logger.error("No files found in iCloud")
+                sys.exit(1)
 
-        # Authenticate with AWS
-        print("\nAuthenticating with AWS...")
-        if not auth_manager.authenticate_aws(config.aws_access_key, config.aws_secret_key):
-            logger.error("Failed to authenticate with AWS")
-            sys.exit(1)
-
-        # Validate S3 bucket
-        if not validate_bucket_name(auth_manager.get_s3_client(), config.s3_bucket):
-            logger.error(f"Unable to access bucket: {config.s3_bucket}")
-            sys.exit(1)
-
-        # Initialize backup manager
-        backup_manager = BackupManager(
-            auth_manager.get_icloud_api(),
-            auth_manager.get_s3_client()
-        )
-
-        # List files from iCloud
-        print("\nListing files from iCloud...")
-        files = backup_manager.list_icloud_files()
-        if not files:
-            logger.error("No files found in iCloud")
-            sys.exit(1)
-
-        print(f"\nFound {len(files)} files to backup")
-
-        # Confirm backup
-        confirm = input("\nDo you want to proceed with the backup? (y/N): ")
-        if confirm.lower() != 'y':
-            print("Backup cancelled")
-            sys.exit(0)
-
-        # Perform backup
-        print("\nStarting backup process...")
-        backup_manager.backup_to_s3(config.s3_bucket, files)
-
-        print("\nBackup completed successfully!")
+            print(f"\nFound {len(files)} files to backup")
+            backup_manager.backup_to_s3(config.s3_bucket, files)
+            print("\nBackup completed successfully!")
+        else:
+            print("\nNo credentials configured. Please configure through the web interface.")
 
     except KeyboardInterrupt:
         print("\nBackup process interrupted by user")
