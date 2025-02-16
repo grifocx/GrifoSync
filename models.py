@@ -44,3 +44,13 @@ class CloudCredentials(db.Model):
     @property
     def s3_bucket(self):
         return os.getenv(f'S3_BUCKET_{self.user_id}')
+
+class BackupJob(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='pending')
+    total_files = db.Column(db.Integer, default=0)
+    processed_files = db.Column(db.Integer, default=0)
+    start_time = db.Column(db.DateTime, default=datetime.utcnow)
+    end_time = db.Column(db.DateTime)
+    error_message = db.Column(db.Text)
