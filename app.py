@@ -12,7 +12,10 @@ from icloud_to_s3.backup import BackupManager
 from icloud_to_s3.utils import handle_2fa_challenge, validate_bucket_name
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.urandom(24)
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
+app.config['SESSION_COOKIE_SECURE'] = True
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=1)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -147,10 +150,11 @@ def setup_credentials():
                 credentials = CloudCredentials(user_id=current_user.id)
 
             credentials.icloud_username = form.icloud_username.data
-            credentials.icloud_password = form.icloud_password.data
-            credentials.aws_access_key = form.aws_access_key.data
-            credentials.aws_secret_key = form.aws_secret_key.data
-            credentials.s3_bucket = form.s3_bucket.data
+            # Store sensitive data in Replit Secrets
+            os.environ[f'ICLOUD_PWD_{current_user.id}'] = form.icloud_password.data
+            os.environ[f'AWS_KEY_{current_user.id}'] = form.aws_access_key.data
+            os.environ[f'AWS_SECRET_{current_user.id}'] = form.aws_secret_key.data
+            os.environ[f'S3_BUCKET_{current_user.id}'] = form.s3_bucket.data
 
             db.session.add(credentials)
             db.session.commit()
