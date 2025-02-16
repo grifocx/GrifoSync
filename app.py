@@ -110,16 +110,7 @@ def login():
 @login_required
 def dashboard():
     credentials = CloudCredentials.query.filter_by(user_id=current_user.id).first()
-    if credentials:
-        session['icloud_username'] = credentials.icloud_username
-        session['icloud_password'] = credentials.icloud_password
-        session['aws_access_key'] = credentials.aws_access_key
-        session['aws_secret_key'] = credentials.aws_secret_key
-        session['s3_bucket'] = credentials.s3_bucket
-        return redirect(url_for('start_backup'))
-    else:
-        return redirect(url_for('setup_credentials'))
-
+    return render_template('dashboard.html', current_user=current_user)
 
 @app.route('/setup_credentials', methods=['GET', 'POST'])
 @login_required
@@ -135,11 +126,11 @@ def setup_credentials():
                 return render_template('setup_credentials.html', form=form)
 
             # Store credentials temporarily for 2FA process
-            session['icloud_username'] = form.icloud_username.data
-            session['icloud_password'] = form.icloud_password.data
-            session['aws_access_key'] = form.aws_access_key.data
-            session['aws_secret_key'] = form.aws_secret_key.data
-            session['s3_bucket'] = form.s3_bucket.data
+            session['temp_icloud_username'] = form.icloud_username.data
+            session['temp_icloud_password'] = form.icloud_password.data
+            session['temp_aws_access_key'] = form.aws_access_key.data
+            session['temp_aws_secret_key'] = form.aws_secret_key.data
+            session['temp_s3_bucket'] = form.s3_bucket.data
 
             # If 2FA is required, redirect to 2FA page
             if auth_manager.get_icloud_api().requires_2fa:
@@ -181,13 +172,13 @@ def two_factor_auth():
     if form.validate_on_submit():
         try:
             auth_manager = AuthenticationManager()
-            
+
             #Using session data here is not ideal but follows original code logic
-            auth_manager.authenticate_icloud(session.get('icloud_username'), session.get('icloud_password'))
+            auth_manager.authenticate_icloud(session.get('temp_icloud_username'), session.get('temp_icloud_password'))
 
             if auth_manager.get_icloud_api().validate_2fa_code(form.code.data):
                 # 2FA successful, proceed with AWS authentication
-                if not auth_manager.authenticate_aws(session.get('aws_access_key'), session.get('aws_secret_key')):
+                if not auth_manager.authenticate_aws(session.get('temp_aws_access_key'), session.get('temp_aws_secret_key')):
                     flash('Failed to authenticate with AWS', 'error')
                     return redirect(url_for('dashboard'))
 
@@ -206,14 +197,19 @@ def two_factor_auth():
 @login_required
 def start_backup():
     try:
+        credentials = CloudCredentials.query.filter_by(user_id=current_user.id).first()
+        if not credentials:
+            flash('Please configure your cloud credentials first', 'warning')
+            return redirect(url_for('setup_credentials'))
+
         # Create a new backup job
         backup_job = BackupJob(user_id=current_user.id, status='in_progress')
         db.session.add(backup_job)
         db.session.commit()
 
         auth_manager = AuthenticationManager()
-        auth_manager.authenticate_icloud(session.get('icloud_username'), session.get('icloud_password'))
-        auth_manager.authenticate_aws(session.get('aws_access_key'), session.get('aws_secret_key'))
+        auth_manager.authenticate_icloud(credentials.icloud_username, credentials.icloud_password)
+        auth_manager.authenticate_aws(credentials.aws_access_key, credentials.aws_secret_key)
 
         backup_manager = BackupManager(
             auth_manager.get_icloud_api(),
@@ -232,9 +228,7 @@ def start_backup():
         backup_job.total_files = len(files)
         db.session.commit()
 
-        # Store files in session for the actual backup process
-        session['files_to_backup'] = len(files)
-        backup_manager.backup_to_s3(session.get('s3_bucket'), files)
+        backup_manager.backup_to_s3(credentials.s3_bucket, files)
 
         # Update backup job status
         backup_job.status = 'completed'
