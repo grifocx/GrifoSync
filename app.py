@@ -3,6 +3,7 @@ from flask_login import LoginManager, login_user, login_required, logout_user, c
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, SubmitField
 from wtforms.validators import DataRequired, Email, Length, EqualTo, ValidationError
+from flask_migrate import Migrate
 import os
 from icloud_to_s3.auth import AuthenticationManager
 from icloud_to_s3.backup import BackupManager
@@ -23,9 +24,8 @@ login_manager.login_view = 'login'
 # Initialize SQLAlchemy
 db.init_app(app)
 
-# Create tables
-with app.app_context():
-    db.create_all()
+# Initialize Flask-Migrate
+migrate = Migrate(app, db)
 
 @login_manager.user_loader
 def load_user(user_id):
