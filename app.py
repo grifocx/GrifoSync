@@ -2,12 +2,12 @@ from flask import Flask, render_template, flash, redirect, url_for, request, ses
 from datetime import timedelta
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
 from flask_wtf import FlaskForm
-from wtforms import StringField, PasswordField, SubmitField
+from wtforms import StringField, PasswordField, SubmitField, SelectField
 from wtforms.validators import DataRequired, Email, Length, EqualTo, ValidationError
 from flask_migrate import Migrate
 import os
 import logging
-from models import db, User, BackupJob
+from models import db, User, BackupJob, CredentialVault
 from datetime import datetime
 from icloud_to_s3.auth import AuthenticationManager
 from icloud_to_s3.backup import BackupManager
@@ -62,7 +62,7 @@ class RegistrationForm(FlaskForm):
     username = StringField('Username', validators=[DataRequired(), Length(min=4, max=80)])
     email = StringField('Email', validators=[DataRequired(), Email()])
     password = PasswordField('Password', validators=[DataRequired(), Length(min=6)])
-    confirm_password = PasswordField('Confirm Password', 
+    confirm_password = PasswordField('Confirm Password',
                                    validators=[DataRequired(), EqualTo('password')])
     submit = SubmitField('Register')
 
@@ -87,6 +87,13 @@ class BackupCredentialsForm(FlaskForm):
 class TwoFactorForm(FlaskForm):
     code = StringField('Verification Code', validators=[DataRequired()])
     submit = SubmitField('Verify')
+
+class SaveCredentialsForm(FlaskForm):
+    credential_type = SelectField('Credential Type', 
+                                choices=[('icloud', 'iCloud'), ('aws', 'AWS')],
+                                validators=[DataRequired()])
+    submit = SubmitField('Save Credentials')
+
 
 @app.route('/')
 def index():
@@ -271,6 +278,67 @@ def perform_backup():
 
         flash(f'Error during backup: {str(e)}', 'error')
         return redirect(url_for('dashboard'))
+
+@app.route('/save_credentials', methods=['POST'])
+@login_required
+def save_credentials():
+    form = SaveCredentialsForm()
+    if form.validate_on_submit():
+        try:
+            # Get credentials from session
+            credentials = {}
+            if form.credential_type.data == 'icloud':
+                credentials = {
+                    'username': session.get('temp_icloud_username'),
+                    'password': session.get('temp_icloud_password')
+                }
+            elif form.credential_type.data == 'aws':
+                credentials = {
+                    'access_key': session.get('temp_aws_access_key'),
+                    'secret_key': session.get('temp_aws_secret_key'),
+                    's3_bucket': session.get('temp_s3_bucket')
+                }
+
+            # Create or update credential vault entry
+            credential = CredentialVault.query.filter_by(
+                user_id=current_user.id,
+                credential_type=form.credential_type.data
+            ).first()
+
+            if not credential:
+                credential = CredentialVault(
+                    user_id=current_user.id,
+                    credential_type=form.credential_type.data
+                )
+                db.session.add(credential)
+
+            credential.encrypt_credentials(credentials)
+            db.session.commit()
+
+            flash(f'{form.credential_type.data.upper()} credentials saved successfully!', 'success')
+        except Exception as e:
+            flash(f'Error saving credentials: {str(e)}', 'error')
+
+    return redirect(url_for('dashboard'))
+
+@app.route('/manage_credentials')
+@login_required
+def manage_credentials():
+    stored_credentials = CredentialVault.query.filter_by(user_id=current_user.id).all()
+    return render_template('manage_credentials.html', credentials=stored_credentials)
+
+@app.route('/delete_credentials/<int:credential_id>', methods=['POST'])
+@login_required
+def delete_credentials(credential_id):
+    credential = CredentialVault.query.filter_by(id=credential_id, user_id=current_user.id).first()
+    if credential:
+        db.session.delete(credential)
+        db.session.commit()
+        flash('Credentials deleted successfully', 'success')
+    else:
+        flash('Credentials not found', 'error')
+    return redirect(url_for('manage_credentials'))
+
 
 @app.route('/logout')
 @login_required

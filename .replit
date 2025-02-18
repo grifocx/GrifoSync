@@ -45,7 +45,7 @@ task = "packager.installForAll"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python app.py"
+args = "flask db upgrade && python app.py"
 waitForPort = 8080
 
 [deployment]
