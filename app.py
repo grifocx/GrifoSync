@@ -188,11 +188,16 @@ def two_factor_auth():
         try:
             auth_manager = AuthenticationManager()
 
+            # Get credentials from session
+            icloud_username = session.get('temp_icloud_username')
+            icloud_password = session.get('temp_icloud_password')
+
+            if not all([icloud_username, icloud_password]):
+                flash('Session expired. Please enter your credentials again.', 'error')
+                return redirect(url_for('start_backup'))
+
             # Authenticate with iCloud using temporary credentials
-            auth_manager.authenticate_icloud(
-                session.get('temp_icloud_username'),
-                session.get('temp_icloud_password')
-            )
+            auth_manager.authenticate_icloud(icloud_username, icloud_password)
 
             if auth_manager.get_icloud_api().validate_2fa_code(form.code.data):
                 # 2FA successful, proceed with backup
@@ -202,6 +207,13 @@ def two_factor_auth():
                 return render_template('2fa.html', form=form)
 
         except Exception as e:
+            # Clear sensitive data if there's an error
+            session.pop('temp_icloud_username', None)
+            session.pop('temp_icloud_password', None)
+            session.pop('temp_aws_access_key', None)
+            session.pop('temp_aws_secret_key', None)
+            session.pop('temp_s3_bucket', None)
+
             flash(f'Error during 2FA verification: {str(e)}', 'error')
             return render_template('2fa.html', form=form)
 
@@ -222,16 +234,19 @@ def perform_backup():
 
         auth_manager = AuthenticationManager()
 
-        # Authenticate with temporary credentials
-        auth_manager.authenticate_icloud(
-            session.get('temp_icloud_username'),
-            session.get('temp_icloud_password')
-        )
+        # Get credentials from session and immediately clear them
+        icloud_username = session.pop('temp_icloud_username', None)
+        icloud_password = session.pop('temp_icloud_password', None)
+        aws_access_key = session.pop('temp_aws_access_key', None)
+        aws_secret_key = session.pop('temp_aws_secret_key', None)
+        s3_bucket = session.pop('temp_s3_bucket', None)
 
-        auth_manager.authenticate_aws(
-            session.get('temp_aws_access_key'),
-            session.get('temp_aws_secret_key')
-        )
+        if not all([icloud_username, icloud_password, aws_access_key, aws_secret_key, s3_bucket]):
+            raise ValueError("Missing required credentials")
+
+        # Authenticate with temporary credentials
+        auth_manager.authenticate_icloud(icloud_username, icloud_password)
+        auth_manager.authenticate_aws(aws_access_key, aws_secret_key)
 
         backup_manager = BackupManager(
             auth_manager.get_icloud_api(),
@@ -251,20 +266,13 @@ def perform_backup():
         db.session.commit()
 
         # Perform backup
-        backup_manager.backup_to_s3(session.get('temp_s3_bucket'), files)
+        backup_manager.backup_to_s3(s3_bucket, files)
 
         # Update backup job status
         backup_job.status = 'completed'
         backup_job.processed_files = len(files)
         backup_job.end_time = datetime.utcnow()
         db.session.commit()
-
-        # Clear temporary credentials from session
-        session.pop('temp_icloud_username', None)
-        session.pop('temp_icloud_password', None)
-        session.pop('temp_aws_access_key', None)
-        session.pop('temp_aws_secret_key', None)
-        session.pop('temp_s3_bucket', None)
 
         flash('Backup completed successfully!', 'success')
         return redirect(url_for('dashboard'))
